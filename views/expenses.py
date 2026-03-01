@@ -5,6 +5,7 @@ from datetime import date
 
 from constants import CATEGORIES
 from db.expenses import get_expenses, add_expense, delete_expense
+from db.misc import get_misc, set_misc
 
 CATEGORY_COLORS = {
     "Food":           "#f97316",
@@ -28,6 +29,10 @@ def show(access_token: str, user_id: str):
         df["date"] = pd.to_datetime(df["date"])
         df["month_key"] = df["date"].dt.strftime("%Y-%m")
         df["month_label"] = df["date"].dt.strftime("%B %Y")
+
+    # Load budgets from DB
+    if "budgets" not in st.session_state or not st.session_state.budgets:
+        st.session_state.budgets = get_misc(access_token, user_id, "budgets")
 
     # ── Metrics ──
     this_month = (
@@ -57,11 +62,12 @@ def show(access_token: str, user_id: str):
         st.metric("🎯 Monthly Budget", f"${total_budget:,.2f}" if total_budget > 0 else "Not set")
 
     st.markdown("---")
-    left, right = st.columns([1, 2])
 
-    # ── Add Expense Form ──
-    with left:
-        st.subheader("➕ Add Expense")
+    # ── Tabs for mobile-friendly navigation ──
+    tab1, tab2, tab3, tab4 = st.tabs(["➕ Add", "📊 Chart", "🎯 Budgets", "📋 Expenses"])
+
+    # ── Tab 1: Add Expense ──
+    with tab1:
         with st.form("add_expense_form", clear_on_submit=True):
             expense_date = st.date_input("Date", value=date.today())
             amount = st.number_input("Amount ($)", min_value=0.0, step=10.0, format="%.2f")
@@ -80,29 +86,11 @@ def show(access_token: str, user_id: str):
                 else:
                     st.warning("Please enter a valid amount.")
 
-        # ── Budget Thresholds ──
-        st.subheader("🎯 Monthly Budgets")
-        st.caption("Set a monthly limit per category to track overspending.")
-
-        if "budgets" not in st.session_state:
-            st.session_state.budgets = {}
-
-        with st.form("budget_form", clear_on_submit=False):
-            for cat in CATEGORIES:
-                current = st.session_state.budgets.get(cat, 0)
-                val = st.number_input(
-                    cat, min_value=0.0, value=float(current),
-                    step=50.0, format="%.0f", key=f"budget_{cat}"
-                )
-                st.session_state.budgets[cat] = val
-            st.form_submit_button("Save Budgets", use_container_width=True)
-
-    # ── Right column ──
-    with right:
-        # Stacked monthly bar chart
-        if not df.empty:
-            st.subheader("📊 Monthly Spending")
-
+    # ── Tab 2: Chart ──
+    with tab2:
+        if df.empty:
+            st.info("No expenses yet.")
+        else:
             all_months = sorted(df["month_key"].unique(), reverse=True)[:6]
             chart_df = df[df["month_key"].isin(all_months)].copy()
             chart_df["month_label"] = chart_df["date"].dt.strftime("%b %Y")
@@ -142,100 +130,111 @@ def show(access_token: str, user_id: str):
                 plot_bgcolor="rgba(0,0,0,0)",
                 paper_bgcolor="rgba(0,0,0,0)",
                 font=dict(family="DM Sans", color="#4a4a6a"),
-                xaxis=dict(showgrid=False, zeroline=False, tickfont=dict(size=12, color="#4a4a6a")),
-                yaxis=dict(showgrid=False, zeroline=False, tickprefix="$", tickfont=dict(size=11, color="#9090a8"), showline=False),
-                margin=dict(t=10, b=100, l=10, r=10),
+                xaxis=dict(showgrid=False, zeroline=False, tickfont=dict(size=11, color="#4a4a6a")),
+                yaxis=dict(showgrid=False, zeroline=False, tickprefix="$", tickfont=dict(size=10, color="#9090a8"), showline=False),
+                margin=dict(t=10, b=120, l=0, r=0),
                 height=380,
                 hoverlabel=dict(bgcolor="white", font_size=13, font_family="DM Sans", bordercolor="#e0e0ee"),
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        # ── Budget vs Actual ──
-        budgets = {k: v for k, v in st.session_state.get("budgets", {}).items() if v > 0}
-        if budgets and not df.empty:
-            st.subheader("🎯 Budget vs Actual")
-
-            all_months = sorted(df["month_key"].unique(), reverse=True)[:6]
-            for month_key in all_months:
-                month_label = df[df["month_key"] == month_key]["month_label"].iloc[0]
-                month_data = df[df["month_key"] == month_key]
-                cat_totals = month_data.groupby("category")["amount"].sum().to_dict()
-
-                has_data = any(cat in cat_totals for cat in budgets)
-                if not has_data:
-                    continue
-
-                st.markdown(f"**{month_label}**")
-                for cat, budget in budgets.items():
-                    actual = cat_totals.get(cat, 0)
-                    if actual == 0:
-                        continue
-                    pct = (actual / budget) * 100
-                    over = pct > 100
-                    color = CATEGORY_COLORS.get(cat, "#94a3b8")
-                    bar_color = "#ef4444" if over else color
-                    diff_pct = pct - 100 if over else 100 - pct
-                    label = f"**+{diff_pct:.0f}% over**" if over else f"{diff_pct:.0f}% under"
-
-                    st.markdown(
-                        f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">'
-                        f'<span style="width:100px;font-size:0.82rem;color:#4a4a6a">{cat}</span>'
-                        f'<div style="flex:1;background:#f0f0f8;border-radius:20px;height:10px;overflow:hidden">'
-                        f'<div style="width:{min(pct,100):.0f}%;background:{bar_color};height:100%;border-radius:20px;transition:width 0.3s"></div>'
-                        f'</div>'
-                        f'<span style="width:110px;font-size:0.8rem;color:{"#ef4444" if over else "#22c55e"};text-align:right">'
-                        f'${actual:,.0f} / ${budget:,.0f} &nbsp; {label}</span>'
-                        f'</div>',
-                        unsafe_allow_html=True
-                    )
+            # Budget vs Actual
+            budgets = {k: v for k, v in st.session_state.get("budgets", {}).items() if v > 0}
+            if budgets:
                 st.markdown("---")
+                st.subheader("🎯 Budget vs Actual")
+                all_months_ba = sorted(df["month_key"].unique(), reverse=True)[:6]
+                for month_key in all_months_ba:
+                    month_label = df[df["month_key"] == month_key]["month_label"].iloc[0]
+                    month_data = df[df["month_key"] == month_key]
+                    cat_totals = month_data.groupby("category")["amount"].sum().to_dict()
 
-        # ── Expense List ──
-        st.subheader("📋 Expenses")
+                    has_data = any(cat in cat_totals for cat in budgets)
+                    if not has_data:
+                        continue
+
+                    st.markdown(f"**{month_label}**")
+                    for cat, budget in budgets.items():
+                        actual = cat_totals.get(cat, 0)
+                        if actual == 0:
+                            continue
+                        pct = (actual / budget) * 100
+                        over = pct > 100
+                        color = CATEGORY_COLORS.get(cat, "#94a3b8")
+                        bar_color = "#ef4444" if over else color
+                        diff_pct = pct - 100 if over else 100 - pct
+                        label = f"+{diff_pct:.0f}% over" if over else f"{diff_pct:.0f}% under"
+                        label_color = "#ef4444" if over else "#22c55e"
+
+                        st.markdown(
+                            f'<div style="margin-bottom:10px">'
+                            f'<div style="display:flex;justify-content:space-between;margin-bottom:3px">'
+                            f'<span style="font-size:0.82rem;color:#4a4a6a">{cat}</span>'
+                            f'<span style="font-size:0.78rem;color:{label_color}">${actual:,.0f} / ${budget:,.0f} · {label}</span>'
+                            f'</div>'
+                            f'<div style="background:#f0f0f8;border-radius:20px;height:8px;overflow:hidden">'
+                            f'<div style="width:{min(pct,100):.0f}%;background:{bar_color};height:100%;border-radius:20px"></div>'
+                            f'</div></div>',
+                            unsafe_allow_html=True
+                        )
+                    st.markdown("---")
+
+    # ── Tab 3: Budgets ──
+    with tab3:
+        st.caption("Set a monthly limit per category.")
+        with st.form("budget_form", clear_on_submit=False):
+            new_budgets = {}
+            for cat in CATEGORIES:
+                current = st.session_state.budgets.get(cat, 0)
+                val = st.number_input(
+                    cat, min_value=0.0, value=float(current),
+                    step=50.0, format="%.0f", key=f"budget_{cat}"
+                )
+                new_budgets[cat] = val
+            if st.form_submit_button("Save Budgets", use_container_width=True):
+                if set_misc(access_token, user_id, "budgets", new_budgets):
+                    st.session_state.budgets = new_budgets
+                    st.success("Budgets saved!")
+
+    # ── Tab 4: Expenses ──
+    with tab4:
         if df.empty:
-            st.info("No expenses yet. Add your first one! 👈")
+            st.info("No expenses yet. Add your first one!")
         else:
-            # Month filter for list only
             months = df[["month_key", "month_label"]].drop_duplicates().sort_values("month_key", ascending=False)
             month_options = {"All Time": None} | dict(zip(months["month_label"], months["month_key"]))
-            fcol1, fcol2, fcol3 = st.columns(3)
-            with fcol1:
+
+            col_a, col_b = st.columns(2)
+            with col_a:
                 selected_month_label = st.selectbox("Month", list(month_options.keys()), label_visibility="collapsed")
                 selected_month = month_options[selected_month_label]
                 month_df = df if selected_month is None else df[df["month_key"] == selected_month]
-            with fcol2:
+            with col_b:
                 all_cats = ["All Categories"] + sorted(month_df["category"].unique().tolist())
                 filter_cat = st.selectbox("Category", all_cats, label_visibility="collapsed")
-            with fcol3:
-                all_tags = set()
-                for t in month_df["tags"].dropna():
-                    if isinstance(t, list):
-                        all_tags.update(t)
-                all_tags = ["All Tags"] + sorted(all_tags)
-                filter_tag = st.selectbox("Tag", all_tags, label_visibility="collapsed")
 
             filtered = month_df.copy()
             if filter_cat != "All Categories":
                 filtered = filtered[filtered["category"] == filter_cat]
-            if filter_tag != "All Tags":
-                filtered = filtered[filtered["tags"].apply(
-                    lambda t: filter_tag in t if isinstance(t, list) else False
-                )]
 
             for _, row in filtered.iterrows():
-                col_a, col_b, col_c, col_d = st.columns([1.5, 3, 1.5, 0.5])
-                with col_a:
-                    st.markdown(f"**${row['amount']:,.2f}**")
-                with col_b:
-                    color = CATEGORY_COLORS.get(row["category"], "#94a3b8")
-                    st.markdown(f'<span style="background:{color}22;color:{color};padding:2px 8px;border-radius:6px;font-size:0.8rem">{row["category"]}</span> {row.get("note", "") or ""}', unsafe_allow_html=True)
-                    tags = row.get("tags", [])
-                    if tags:
-                        tag_html = " ".join([f'<span class="tag-badge">#{t}</span>' for t in tags])
-                        st.markdown(tag_html, unsafe_allow_html=True)
-                with col_c:
-                    st.markdown(f"<small style='color:#6b6b80'>{row['date'].strftime('%b %d, %Y')}</small>", unsafe_allow_html=True)
-                with col_d:
+                color = CATEGORY_COLORS.get(row["category"], "#94a3b8")
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    st.markdown(
+                        f'<div style="padding:8px 0">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center">'
+                        f'<span style="font-weight:700;font-size:1rem">${row["amount"]:,.2f}</span>'
+                        f'<span style="font-size:0.75rem;color:#9090a8">{row["date"].strftime("%b %d")}</span>'
+                        f'</div>'
+                        f'<div style="margin-top:3px">'
+                        f'<span style="background:{color}22;color:{color};padding:1px 8px;border-radius:6px;font-size:0.75rem">{row["category"]}</span>'
+                        f'<span style="color:#4a4a6a;font-size:0.85rem;margin-left:6px">{row.get("note", "") or ""}</span>'
+                        f'</div>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                with col2:
                     if st.button("🗑️", key=f"del_{row['id']}"):
                         delete_expense(access_token, row["id"])
                         st.rerun()
