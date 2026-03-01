@@ -1,4 +1,7 @@
 import streamlit as st
+import os
+from dotenv import load_dotenv
+load_dotenv()
 from streamlit_supabase_auth import login_form, logout_button
 
 from config import SUPABASE_URL, SUPABASE_KEY
@@ -33,6 +36,16 @@ access_token = session.get("access_token", "")
 user_id = session["user"]["id"]
 email = session["user"]["email"]
 name = session["user"].get("user_metadata", {}).get("full_name", email)
+
+# Allowlist — only these emails can access the app
+allowed = os.getenv("ALLOWED_EMAILS", "")
+ALLOWED_EMAILS = [e.strip() for e in allowed.split(",") if e.strip()]
+if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:
+    st.error("⛔ Access denied. You are not authorized to use this app.")
+    st.warning(f"Signed in as: {email}")
+    from streamlit_supabase_auth import logout_button
+    logout_button()
+    st.stop()
 
 # Header
 col1, col2 = st.columns([4, 1])
